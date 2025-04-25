@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+
 import numpy as np
-from utils import PrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder
+from utils import PrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder, RunningMeanStd
 from tqdm import tqdm
 
 import gym
@@ -32,7 +33,7 @@ class SkipFrame(gym.Wrapper):
 class DQNAgent:
     def __init__(self, obs_shape, action_dim, lr=0.0001, gamma=1.0, batch_size=32, tau=0.01, beta=0.1,
                  start_epsilon=1.0, epsilon_min=0.1, epsilon_decay=0.9995, target_update_freq=100, replay_buffer_size=1000000,
-                 icm_eta=0.01):
+                 icm_eta=0.1, icm_lambda=0.1):
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -66,7 +67,13 @@ class DQNAgent:
             list(self.icm.parameters()),
             lr=lr
         )
-
+        # self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     self.optimizer,
+        #     mode='max',         # we want to maximize total_reward
+        #     factor=0.5,         # lr ← lr * 0.5
+        #     patience=5000,        # wait 10 calls without improvement
+        #     verbose=False
+        # )
 
         # Initialize the exploration strategy
         self.epsilon = start_epsilon
@@ -82,6 +89,8 @@ class DQNAgent:
 
         # Initialize ICM hyperparameters
         self.icm_eta = icm_eta
+        self.icm_lambda = icm_lambda
+        self.icm_rms = RunningMeanStd()
 
     def select_action(self, observation):        
         state = observation.clone() if isinstance(observation, torch.Tensor) else torch.tensor(observation)
@@ -112,6 +121,20 @@ class DQNAgent:
             next_ft = self.feature_encoder(next_state).detach()
             target_q_values = self.target_network(next_ft)
             target_q_value = reward + (1 - done) * self.gamma * target_q_values.max(1)[0]
+        # self.target_network.reset_noise()
+        # with torch.no_grad():
+        #     next_ft = self.feature_encoder(next_state)
+
+        #     # action selection by online net
+        #     self.q_network.reset_noise()
+        #     next_q_online = self.q_network(next_ft)
+        #     next_actions  = next_q_online.argmax(dim=1, keepdim=True)
+
+        #     # action evaluation by target net
+        #     next_q_target = self.target_network(next_ft)
+        #     next_q_value  = next_q_target.gather(1, next_actions).squeeze(1)
+
+        #     target_q_value = reward + (1 - done) * self.gamma * next_q_value
 
         # Compute the current Q-values
         self.q_network.reset_noise()
@@ -133,10 +156,10 @@ class DQNAgent:
         inv_loss, for_loss, _ = self.icm(ft, next_ft, a_onehot_b)
         icm_loss = (1 - self.beta) * inv_loss + self.beta * for_loss
         
-        all_loss = loss + icm_loss
+        all_loss = loss + self.icm_lambda * icm_loss
         
         # gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 250.0)
+        # torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 250.0)
 
         # Optimize the Q-network and ICM
         self.optimizer.zero_grad()
@@ -179,10 +202,16 @@ def main():
     agent = DQNAgent(obs_shape=(4, 84, 84), action_dim=env.action_space.n, lr=args.lr, gamma=args.gamma,
                      batch_size=args.batch_size, epsilon_decay=args.epsilon_decay, target_update_freq=args.target_update_freq)
     
-    if os.path.exists("checkpoints/model_{args.start_episode}.pth"):
-        agent.q_network.load_state_dict(torch.load("checkpoints/model_{args.start_episode}.pth"))
-    if os.path.exists("checkpoints/icm_{args.start_episode}.pth"):
-        agent.icm.load_state_dict(torch.load("checkpoints/icm_{args.start_episode}.pth"))
+    if os.path.exists(f"checkpoints/skip_model_{args.start_episode}.pth"):
+        print("Loading DQN from checkpoint...")
+        agent.q_network.load_state_dict(torch.load(f"checkpoints/skip_model_{args.start_episode}.pth"))
+        agent.target_network.load_state_dict(agent.q_network.state_dict())
+    if os.path.exists(f"checkpoints/skip_icm_{args.start_episode}.pth"):
+        print("Loading ICM from checkpoint...")
+        agent.icm.load_state_dict(torch.load(f"checkpoints/skip_icm_{args.start_episode}.pth"))
+    if os.path.exists(f"checkpoints/skip_feature_{args.start_episode}.pth"):
+        print("Loading Feature Encoder from checkpoint...")
+        agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/skip_feature_{args.start_episode}.pth"))
     
     print("device:", agent.device)
     reward_per_eps = []
@@ -190,6 +219,8 @@ def main():
         obs = env.reset()
         done = False
         total_reward = 0
+        total_intrinsic_reward = 0
+        total_extrinsic_reward = 0
         obs = torch.tensor(np.array(obs), dtype=torch.float32).to(agent.device).squeeze(-1)
         total_q_loss = 0
         total_icm_loss = 0
@@ -207,7 +238,13 @@ def main():
                 agent.feature_encoder(next_obs),
                 a_one_hot
             )
-            t_reward = reward + agent.icm_eta * intrinsic_reward.item()
+            
+            ir_np = intrinsic_reward.cpu().numpy()
+            agent.icm_rms.update(ir_np)
+            norm_ir = agent.icm_rms.normalize(ir_np)
+            t_reward = reward + agent.icm_eta * norm_ir
+
+            
 
             # Store the transition in the replay buffer
             agent.replay_buffer.push(obs.cpu(), action, t_reward, next_obs.cpu(), done)
@@ -217,7 +254,10 @@ def main():
 
             obs = next_obs
 
-            total_reward += reward
+            total_reward += t_reward
+            total_intrinsic_reward += agent.icm_eta * intrinsic_reward.item()
+            total_extrinsic_reward += reward
+
             if q_loss is not None and icm_loss is not None:
                 total_q_loss += q_loss
                 total_icm_loss += icm_loss
@@ -229,27 +269,31 @@ def main():
             if agent.target_update_counter % agent.target_update_freq == 0:
                 agent.update()
             
-        # Decay epsilon
-        agent.epsilon = max(agent.epsilon_min, agent.epsilon * agent.epsilon_decay)
+            # env.render()
+            
+        # agent.scheduler.step(total_reward)
 
         reward_per_eps.append(total_reward)
         
         if (eps + 1) % 10 == 0:
-            print(f"Episode {eps + 1}, Avg Reward: {np.mean(reward_per_eps[-10:])}, Epsilon: {agent.epsilon:.4f}")
+            print(f"Episode {eps + 1}, Avg Reward: {np.mean(reward_per_eps[-10:])}")
 
         if (eps + 1) % 20 == 0:
-            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/skip_feature_{eps + 1}.pth")
-            torch.save(agent.q_network.state_dict(), f"checkpoints/skip_model_{eps + 1}.pth")
-            torch.save(agent.icm.state_dict(), f"checkpoints/skip_icm_{eps + 1}.pth")
+            if not os.path.exists('checkpoints/'):
+                os.makedirs('checkpoints/')
+            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/double_feature_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.q_network.state_dict(), f"checkpoints/double_model_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.icm.state_dict(), f"checkpoints/doouble_icm_{args.start_episode + eps + 1}.pth")
 
         if args.use_wandb:
             wandb.log({
+                'instrinsic_reward': agent.icm_eta * intrinsic_reward.item(),
+                'reward': reward,
                 'total_reward': total_reward,
                 'q_loss': total_q_loss / steps,
                 'icm_loss': total_icm_loss / steps,
                 'total_loss': total_loss / steps,
-                'epsilon': agent.epsilon
             })
-   
+    # env.close()
 if __name__ == "__main__":
     main()
