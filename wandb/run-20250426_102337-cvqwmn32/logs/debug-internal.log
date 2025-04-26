@@ -1,7 +1,0 @@
-{"time":"2025-04-26T10:23:37.124811726+08:00","level":"INFO","msg":"stream: starting","core version":"0.19.9","symlink path":"/home/chunyulin/Desktop/DRL/DRL-Assignment-3/wandb/run-20250426_102337-cvqwmn32/logs/debug-core.log"}
-{"time":"2025-04-26T10:23:37.443630427+08:00","level":"INFO","msg":"created new stream","id":"cvqwmn32"}
-{"time":"2025-04-26T10:23:37.443751493+08:00","level":"INFO","msg":"stream: started","id":"cvqwmn32"}
-{"time":"2025-04-26T10:23:37.443772482+08:00","level":"INFO","msg":"writer: Do: started","stream_id":"cvqwmn32"}
-{"time":"2025-04-26T10:23:37.443793616+08:00","level":"INFO","msg":"sender: started","stream_id":"cvqwmn32"}
-{"time":"2025-04-26T10:23:37.443949322+08:00","level":"INFO","msg":"handler: started","stream_id":"cvqwmn32"}
-{"time":"2025-04-26T10:23:37.965306249+08:00","level":"INFO","msg":"Starting system monitor"}
