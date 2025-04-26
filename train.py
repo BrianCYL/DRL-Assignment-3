@@ -4,8 +4,9 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 import numpy as np
-from utils import PrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder, RunningMeanStd
+from utils import PrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder, RunningMeanStd, NoisyLinear
 from tqdm import tqdm
+import math
 
 import gym
 from gym.wrappers import GrayScaleObservation, ResizeObservation, FrameStack, TimeLimit
@@ -30,26 +31,57 @@ class SkipFrame(gym.Wrapper):
                 break
         return obs, total_reward, done, info
 
+def init_weights(module):
+    """
+    Applies:
+      - Kaiming (He) Normal for Conv2d + ReLU
+      - Xavier Uniform for plain Linear layers
+      - The NoisyNet μ‐uniform rule for NoisyLinear
+      - Zeroes for all biases
+    """
+    if isinstance(module, nn.Conv2d):
+        # He normal for conv+ReLU
+        nn.init.kaiming_normal_(module.weight, nonlinearity='relu')
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+    elif isinstance(module, nn.Linear) and not isinstance(module, NoisyLinear):
+        # Xavier uniform for standard FC
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+    elif isinstance(module, NoisyLinear):
+        # μ ∼ Uniform(−1/√fan_in, +1/√fan_in)
+        fan_in = module.in_features
+        bound  = 1.0 / math.sqrt(fan_in)
+        module.weight_mu.data.uniform_(-bound, bound)
+        module.bias_mu.data.uniform_(-bound, bound)
+
+
 class DQNAgent:
     def __init__(self, obs_shape, action_dim, lr=0.0001, gamma=1.0, batch_size=32, tau=0.01, beta=0.1,
                  start_epsilon=1.0, epsilon_min=0.1, epsilon_decay=0.9995, target_update_freq=100, replay_buffer_size=1000000,
-                 icm_eta=0.1, icm_lambda=0.1):
+                 icm_eta=0.1, icm_lambda=0.01):
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Initialize the feature extractor
         self.feature_encoder = FeatureEncoder(obs_shape).to(self.device)
+        self.feature_encoder.apply(init_weights)
         feature_dim = self.feature_encoder.conv_out_dim
 
         # Initialize the Q-network and target network
         self.q_network = NoisyDuelDQN(feature_dim, action_dim).to(self.device)
+        self.q_network.apply(init_weights)
         self.target_network = NoisyDuelDQN(feature_dim, action_dim).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())
         self.target_network.eval()
 
         # Initialize the ICM
         self.icm = ICM(feature_dim, action_dim).to(self.device)
+        self.icm.apply(init_weights)
 
         # Initialize the criterion
         self.criterion = nn.SmoothL1Loss()
@@ -202,16 +234,16 @@ def main():
     agent = DQNAgent(obs_shape=(4, 84, 84), action_dim=env.action_space.n, lr=args.lr, gamma=args.gamma,
                      batch_size=args.batch_size, epsilon_decay=args.epsilon_decay, target_update_freq=args.target_update_freq)
     
-    if os.path.exists(f"checkpoints/skip_model_{args.start_episode}.pth"):
+    if os.path.exists(f"checkpoints/double_model_{args.start_episode}.pth"):
         print("Loading DQN from checkpoint...")
-        agent.q_network.load_state_dict(torch.load(f"checkpoints/skip_model_{args.start_episode}.pth"))
+        agent.q_network.load_state_dict(torch.load(f"checkpoints/double_model_{args.start_episode}.pth"))
         agent.target_network.load_state_dict(agent.q_network.state_dict())
-    if os.path.exists(f"checkpoints/skip_icm_{args.start_episode}.pth"):
+    if os.path.exists(f"checkpoints/double_icm_{args.start_episode}.pth"):
         print("Loading ICM from checkpoint...")
-        agent.icm.load_state_dict(torch.load(f"checkpoints/skip_icm_{args.start_episode}.pth"))
-    if os.path.exists(f"checkpoints/skip_feature_{args.start_episode}.pth"):
+        agent.icm.load_state_dict(torch.load(f"checkpoints/double_icm_{args.start_episode}.pth"))
+    if os.path.exists(f"checkpoints/double_feature_{args.start_episode}.pth"):
         print("Loading Feature Encoder from checkpoint...")
-        agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/skip_feature_{args.start_episode}.pth"))
+        agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/double_feature_{args.start_episode}.pth"))
     
     print("device:", agent.device)
     reward_per_eps = []
@@ -239,11 +271,11 @@ def main():
                 a_one_hot
             )
             
-            ir_np = intrinsic_reward.cpu().numpy()
-            agent.icm_rms.update(ir_np)
-            norm_ir = agent.icm_rms.normalize(ir_np)
-            t_reward = reward + agent.icm_eta * norm_ir
-
+            # ir = float(intrinsic_reward.item())  
+            # agent.icm_rms.update(ir)                
+            # norm_ir = float(agent.icm_rms.normalize(ir))  
+            # t_reward = reward + agent.icm_eta * norm_ir
+            t_reward = reward + agent.icm_eta * intrinsic_reward.item()
             
 
             # Store the transition in the replay buffer
@@ -273,7 +305,7 @@ def main():
             
         # agent.scheduler.step(total_reward)
 
-        reward_per_eps.append(total_reward)
+        reward_per_eps.append(total_extrinsic_reward)
         
         if (eps + 1) % 10 == 0:
             print(f"Episode {eps + 1}, Avg Reward: {np.mean(reward_per_eps[-10:])}")
@@ -281,14 +313,14 @@ def main():
         if (eps + 1) % 20 == 0:
             if not os.path.exists('checkpoints/'):
                 os.makedirs('checkpoints/')
-            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/double_feature_{args.start_episode + eps + 1}.pth")
-            torch.save(agent.q_network.state_dict(), f"checkpoints/double_model_{args.start_episode + eps + 1}.pth")
-            torch.save(agent.icm.state_dict(), f"checkpoints/doouble_icm_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/int_feature_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.q_network.state_dict(), f"checkpoints/int_model_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.icm.state_dict(), f"checkpoints/int_icm_{args.start_episode + eps + 1}.pth")
 
         if args.use_wandb:
             wandb.log({
-                'instrinsic_reward': agent.icm_eta * intrinsic_reward.item(),
-                'reward': reward,
+                'instrinsic_reward': total_intrinsic_reward,
+                'extrinsic reward': total_extrinsic_reward,
                 'total_reward': total_reward,
                 'q_loss': total_q_loss / steps,
                 'icm_loss': total_icm_loss / steps,

@@ -1,0 +1,28 @@
+/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/envs/registration.py:505: UserWarning: [33mWARN: The environment SuperMarioBros-v0 is out of date. You should consider upgrading to version `v3` with the environment ID `SuperMarioBros-v3`.[0m
+  logger.warn(
+device: cuda
+ 22%|████████████████████████████▎                                                                                                     | 109/500 [08:40<31:06,  4.77s/it]
+Episode 10, Avg Reward: 748.5757620708272
+Episode 20, Avg Reward: 748.2548508874328
+Episode 30, Avg Reward: 745.4830378532411
+Episode 40, Avg Reward: 741.8257921172678
+Episode 50, Avg Reward: 742.0899795488268
+Episode 60, Avg Reward: 741.1231516957283
+Episode 70, Avg Reward: 741.7089945878832
+Episode 80, Avg Reward: 740.9930241858216
+Episode 90, Avg Reward: 741.895691819936
+Episode 100, Avg Reward: 742.2571205335109
+Traceback (most recent call last):
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/train.py", line 299, in <module>
+    # Update the target network
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/train.py", line 232, in main
+    env = FrameStack(env, num_stack=4)
+  File "/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/wrappers/time_limit.py", line 17, in step
+    observation, reward, done, info = self.env.step(action)
+  File "/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/wrappers/frame_stack.py", line 117, in step
+    observation, reward, done, info = self.env.step(action)
+  File "/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/core.py", line 315, in step
+    return self.observation(observation), reward, done, info
+  File "/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/wrappers/resize_observation.py", line 23, in observation
+    observation = cv2.resize(
+KeyboardInterrupt

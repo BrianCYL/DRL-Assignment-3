@@ -1,0 +1,5 @@
+/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/envs/registration.py:505: UserWarning: [33mWARN: The environment SuperMarioBros-v0 is out of date. You should consider upgrading to version `v3` with the environment ID `SuperMarioBros-v3`.[0m
+  logger.warn(
+device: cuda
+  2%|██▉                                                                                                                       | 12/500 [17:21<12:25:23, 91.65s/it]
+Episode 10, Avg Reward: 615.9

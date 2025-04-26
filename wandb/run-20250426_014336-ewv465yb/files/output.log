@@ -1,0 +1,20 @@
+/home/chunyulin/anaconda3/envs/drl_hw3/lib/python3.10/site-packages/gym/envs/registration.py:505: UserWarning: [33mWARN: The environment SuperMarioBros-v0 is out of date. You should consider upgrading to version `v3` with the environment ID `SuperMarioBros-v3`.[0m
+  logger.warn(
+device: cuda
+ 13%|█████████████████                                                                                                                  | 65/500 [05:10<34:35,  4.77s/it]
+Episode 10, Avg Reward: 740.7248795825243
+Episode 20, Avg Reward: 746.8335846670344
+Episode 30, Avg Reward: 748.3508098445459
+Episode 40, Avg Reward: 753.0347605093941
+Episode 50, Avg Reward: 752.483980638832
+Episode 60, Avg Reward: 752.1660166417062
+Traceback (most recent call last):
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/train.py", line 299, in <module>
+    main()
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/train.py", line 253, in main
+    q_loss, icm_loss = agent.train()
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/train.py", line 108, in train
+    state, action, reward, next_state, done, idxs, weights = self.replay_buffer.sample(self.batch_size)
+  File "/home/chunyulin/Desktop/DRL/DRL-Assignment-3/utils.py", line 103, in sample
+    torch.stack(next_states, dim=0),
+KeyboardInterrupt

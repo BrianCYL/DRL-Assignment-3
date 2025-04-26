@@ -1,0 +1,1 @@
+{"_runtime":311.968525291,"_timestamp":1.7456033285900476e+09,"_step":64,"q_loss":0.9918062340468168,"total_loss":1.2468242045491933,"_wandb":{"runtime":312},"reward":-27,"icm_loss":0.25501797050237657,"total_reward":752.3433677725496,"instrinsic_reward":0.6465856552124024}

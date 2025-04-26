@@ -35,7 +35,7 @@ class Agent(object):
         # Load pretrained feature encoder
         self.encoder = FeatureEncoder((4, 84, 84))
         self.encoder.load_state_dict(
-            torch.load('checkpoints/skip_feature_500.pth',map_location=torch.device('cpu'))
+            torch.load('checkpoints/double_feature_500.pth',map_location=torch.device('cpu'))
             )
         self.encoder.eval()
 
@@ -43,7 +43,7 @@ class Agent(object):
         feat_dim = self.encoder.conv_out_dim
         self.q_net = NoisyDuelDQN(feat_dim, self.action_space.n)
         self.q_net.load_state_dict(
-            torch.load('checkpoints/skip_model_500.pth', map_location=torch.device('cpu'))
+            torch.load('checkpoints/double_model_500.pth', map_location=torch.device('cpu'))
             )
         self.q_net.eval()
         self.q_net.reset_noise()
@@ -79,7 +79,8 @@ class Agent(object):
     def act(self, observation):
         # Preprocess raw obs into (4,84,84)
         state = self._preprocess(observation)
-
+        # observation = torch.tensor(np.array(observation), dtype=torch.float32).squeeze(-1)
+        # state = observation.clone() if isinstance(observation, torch.Tensor) else torch.tensor(observation)
         # NoisyNet reset
         self.q_net.reset_noise()
 
@@ -91,28 +92,28 @@ class Agent(object):
         # Greedy action
         return q.argmax(dim=1).item()
 
-# def main():
-#     env = gym_super_mario_bros.make('SuperMarioBros-v0')
-#     env = JoypadSpace(env, COMPLEX_MOVEMENT)
-#     env = SkipFrame(env, skip=4)
-#     env = GrayScaleObservation(env, keep_dim=True)
-#     env = ResizeObservation(env, shape=(84, 84))
-#     env = FrameStack(env, num_stack=4)
-#     agent = Agent()
+def main():
+    env = gym_super_mario_bros.make('SuperMarioBros-v0')
+    env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    env = SkipFrame(env, skip=4)
+    env = GrayScaleObservation(env, keep_dim=True)
+    env = ResizeObservation(env, shape=(84, 84))
+    env = FrameStack(env, num_stack=4)
+    agent = Agent()
 
-#     total_reward = 0
-#     obs = env.reset()
-#     done = False
-#     while not done:
-#         action = agent.act(obs)
-#         obs, reward, done, _ = env.step(action)
-#         if done:
-#             break
-#         total_reward += reward
-#         # env.render()
+    total_reward = 0
+    obs = env.reset()
+    done = False
+    while not done:
+        action = agent.act(obs)
+        obs, reward, done, _ = env.step(action)
+        if done:
+            break
+        total_reward += reward
+        # env.render()
 
-#     print(f'Total reward: {total_reward}')
-#     # env.close()
+    print(f'Total reward: {total_reward}')
+    # env.close()
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()
