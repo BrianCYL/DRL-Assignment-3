@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 import numpy as np
-from utils import PrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder, RunningMeanStd, NoisyLinear
+from utils import NstepPrioritizedReplayBuffer, NoisyDuelDQN, ICM, FeatureEncoder, NoisyLinear
 from tqdm import tqdm
 import math
 
@@ -46,13 +46,11 @@ def init_weights(module):
             nn.init.zeros_(module.bias)
 
     elif isinstance(module, nn.Linear) and not isinstance(module, NoisyLinear):
-        # Xavier uniform for standard FC
         nn.init.xavier_uniform_(module.weight)
         if module.bias is not None:
             nn.init.zeros_(module.bias)
 
     elif isinstance(module, NoisyLinear):
-        # μ ∼ Uniform(−1/√fan_in, +1/√fan_in)
         fan_in = module.in_features
         bound  = 1.0 / math.sqrt(fan_in)
         module.weight_mu.data.uniform_(-bound, bound)
@@ -60,9 +58,9 @@ def init_weights(module):
 
 
 class DQNAgent:
-    def __init__(self, obs_shape, action_dim, lr=0.0001, gamma=1.0, batch_size=32, tau=0.01, beta=0.1,
+    def __init__(self, obs_shape, action_dim, lr=0.0001, gamma=1.0, batch_size=32, tau=0.3, beta=0.1,
                  start_epsilon=1.0, epsilon_min=0.1, epsilon_decay=0.9995, target_update_freq=100, replay_buffer_size=1000000,
-                 icm_eta=0.1, icm_lambda=0.01):
+                 icm_eta=0.1, icm_lambda=0.1):
         self.obs_shape = obs_shape
         self.action_dim = action_dim
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -70,7 +68,7 @@ class DQNAgent:
         # Initialize the feature extractor
         self.feature_encoder = FeatureEncoder(obs_shape).to(self.device)
         self.feature_encoder.apply(init_weights)
-        feature_dim = self.feature_encoder.conv_out_dim
+        feature_dim = self.feature_encoder.proj_dim
 
         # Initialize the Q-network and target network
         self.q_network = NoisyDuelDQN(feature_dim, action_dim).to(self.device)
@@ -90,7 +88,7 @@ class DQNAgent:
         self.target_update_counter = 0
 
         # Initialize the replay buffer
-        self.replay_buffer = PrioritizedReplayBuffer(replay_buffer_size)
+        self.replay_buffer = NstepPrioritizedReplayBuffer(replay_buffer_size, n_step=9)
 
         # Initialize the optimizer
         self.optimizer = optim.Adam(
@@ -99,13 +97,12 @@ class DQNAgent:
             list(self.icm.parameters()),
             lr=lr
         )
-        # self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     self.optimizer,
-        #     mode='max',         # we want to maximize total_reward
-        #     factor=0.5,         # lr ← lr * 0.5
-        #     patience=5000,        # wait 10 calls without improvement
-        #     verbose=False
+        # self.optimizer = optim.Adam(
+        #     list(self.feature_encoder.parameters()) +
+        #     list(self.q_network.parameters()),
+        #     lr=lr
         # )
+        # self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=10_000, gamma=0.9)
 
         # Initialize the exploration strategy
         self.epsilon = start_epsilon
@@ -122,19 +119,23 @@ class DQNAgent:
         # Initialize ICM hyperparameters
         self.icm_eta = icm_eta
         self.icm_lambda = icm_lambda
-        self.icm_rms = RunningMeanStd()
 
     def select_action(self, observation):        
         state = observation.clone() if isinstance(observation, torch.Tensor) else torch.tensor(observation)
-        self.q_network.reset_noise()
         with torch.no_grad():
+            self.q_network.reset_noise()
             ft = self.feature_encoder(state)
             q = self.q_network(ft)
         return q.argmax(dim=1).item()
     
     def train(self):
+        # self.q_network.train()
+        # self.icm.train()
+        # self.feature_encoder.train()
+        # self.target_network.eval()
+
         if len(self.replay_buffer) < self.batch_size:
-            return None, None
+            return None
 
         # Sample a batch from the replay buffer
         state, action, reward, next_state, done, idxs, weights = self.replay_buffer.sample(self.batch_size)
@@ -148,25 +149,11 @@ class DQNAgent:
         idxs = idxs.to(self.device)
         
         # Compute the target Q-values
-        self.target_network.reset_noise()
         with torch.no_grad():
+            self.target_network.reset_noise()
             next_ft = self.feature_encoder(next_state).detach()
-            target_q_values = self.target_network(next_ft)
-            target_q_value = reward + (1 - done) * self.gamma * target_q_values.max(1)[0]
-        # self.target_network.reset_noise()
-        # with torch.no_grad():
-        #     next_ft = self.feature_encoder(next_state)
-
-        #     # action selection by online net
-        #     self.q_network.reset_noise()
-        #     next_q_online = self.q_network(next_ft)
-        #     next_actions  = next_q_online.argmax(dim=1, keepdim=True)
-
-        #     # action evaluation by target net
-        #     next_q_target = self.target_network(next_ft)
-        #     next_q_value  = next_q_target.gather(1, next_actions).squeeze(1)
-
-        #     target_q_value = reward + (1 - done) * self.gamma * next_q_value
+            online_act = self.q_network(next_ft).argmax(dim=1)
+            target_q_value = reward + (1 - done) * (self.gamma ** 9) * self.target_network(next_ft).gather(1, online_act.unsqueeze(1)).squeeze(1)
 
         # Compute the current Q-values
         self.q_network.reset_noise()
@@ -175,40 +162,44 @@ class DQNAgent:
         q_value = q_values.gather(1, action.unsqueeze(1)).squeeze(1)
 
         # Compute the TD error
-        td_errors = (q_value - target_q_value).abs().detach().cpu().numpy()
-        self.replay_buffer.update_priorities(idxs, td_errors)
+        td_errors = (target_q_value - q_value)
+        self.replay_buffer.update_priorities(idxs, td_errors.detach().cpu().numpy())
 
         # Compute the loss
         # loss = self.criterion(q_value, target_q_value)
-        loss = (q_value - target_q_value).pow(2)
+        loss = F.smooth_l1_loss(td_errors, torch.zeros_like(td_errors), reduction='none', beta=1.0)
         loss = (weights * loss).mean()
 
         # Update the ICM
-        a_onehot_b = F.one_hot(action, self.action_dim).float().to(self.device)
-        inv_loss, for_loss, _ = self.icm(ft, next_ft, a_onehot_b)
-        icm_loss = (1 - self.beta) * inv_loss + self.beta * for_loss
+        # a_onehot_b = F.one_hot(action, self.action_dim).float().to(self.device)
+        # inv_loss, for_loss, _ = self.icm(ft, next_ft, a_onehot_b)
+        # icm_loss = (1 - self.beta) * inv_loss + self.beta * for_loss
         
-        all_loss = loss + self.icm_lambda * icm_loss
+        # all_loss = loss + self.icm_lambda * icm_loss
         
         # gradient clipping
         # torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 250.0)
 
         # Optimize the Q-network and ICM
         self.optimizer.zero_grad()
-        all_loss.backward()
+        # all_loss.backward()
+        loss.backward()
         self.optimizer.step()  
+        # self.scheduler.step()
 
-        return loss.item(), icm_loss.item()
+        # return loss.item(), icm_loss.item()
+        return loss.item()
     
     def update(self):
         for t_param, p_param in zip(self.target_network.parameters(), self.q_network.parameters()):
-                t_param.data.copy_(self.tau * p_param.data + (1 - self.tau) * t_param.data)
+                t_param.data.copy_((1 - self.tau) * t_param.data + self.tau * p_param.data)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_episodes', type=int, default=500, help='Number of episodes to train')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
-    parser.add_argument('--gamma', type=float, default=1.0, help='Discount factor')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
+    parser.add_argument('--tau', type=float, default=0.1, help='Soft update parameter')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--epsilon_decay', type=float, default=0.99, help='Epsilon decay rate')
     parser.add_argument('--max_steps', type=int, default=2500, help='Maximum steps per episode')
@@ -231,19 +222,19 @@ def main():
     env = ResizeObservation(env, shape=(84, 84))
     env = FrameStack(env, num_stack=4)
     env = TimeLimit(env, max_episode_steps=args.max_steps)
-    agent = DQNAgent(obs_shape=(4, 84, 84), action_dim=env.action_space.n, lr=args.lr, gamma=args.gamma,
+    agent = DQNAgent(obs_shape=(4, 84, 84), action_dim=env.action_space.n, lr=args.lr, gamma=args.gamma, tau=args.tau,
                      batch_size=args.batch_size, epsilon_decay=args.epsilon_decay, target_update_freq=args.target_update_freq)
     
-    if os.path.exists(f"checkpoints/double_model_{args.start_episode}.pth"):
+    if os.path.exists(f"checkpoints/scheduler_model_{args.start_episode}.pth"):
         print("Loading DQN from checkpoint...")
-        agent.q_network.load_state_dict(torch.load(f"checkpoints/double_model_{args.start_episode}.pth"))
+        agent.q_network.load_state_dict(torch.load(f"checkpoints/scheduler_model_{args.start_episode}.pth"))
         agent.target_network.load_state_dict(agent.q_network.state_dict())
-    if os.path.exists(f"checkpoints/double_icm_{args.start_episode}.pth"):
-        print("Loading ICM from checkpoint...")
-        agent.icm.load_state_dict(torch.load(f"checkpoints/double_icm_{args.start_episode}.pth"))
-    if os.path.exists(f"checkpoints/double_feature_{args.start_episode}.pth"):
+    # if os.path.exists(f"checkpoints/scheduler_icm_{args.start_episode}.pth"):
+    #     print("Loading ICM from checkpoint...")
+    #     agent.icm.load_state_dict(torch.load(f"checkpoints/scheduler_icm_{args.start_episode}.pth"))
+    if os.path.exists(f"checkpoints/scheduler_feature_{args.start_episode}.pth"):
         print("Loading Feature Encoder from checkpoint...")
-        agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/double_feature_{args.start_episode}.pth"))
+        agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/scheduler_feature_{args.start_episode}.pth"))
     
     print("device:", agent.device)
     reward_per_eps = []
@@ -259,41 +250,40 @@ def main():
         total_loss = 0
         total_reward = 0
         steps = 0
-        while not done:
+        while True:
             action = agent.select_action(obs)
-            next_obs, reward, done, _ = env.step(action)
+            next_obs, reward, done, info = env.step(action)
             next_obs = torch.tensor(np.array(next_obs), dtype=torch.float32).to(agent.device).squeeze(-1)
-            a_one_hot = F.one_hot(torch.tensor(action), agent.action_dim).float().to(agent.device)
+            # a_one_hot = F.one_hot(torch.tensor(action), agent.action_dim).float().to(agent.device)
             # Compute the intrinsic reward
-            _, _, intrinsic_reward = agent.icm(
-                agent.feature_encoder(obs),
-                agent.feature_encoder(next_obs),
-                a_one_hot
-            )
+            # with torch.no_grad():
+            #     _, _, intrinsic_reward = agent.icm(
+            #         agent.feature_encoder(obs),
+            #         agent.feature_encoder(next_obs),
+            #         a_one_hot
+            #     )
             
-            # ir = float(intrinsic_reward.item())  
-            # agent.icm_rms.update(ir)                
-            # norm_ir = float(agent.icm_rms.normalize(ir))  
-            # t_reward = reward + agent.icm_eta * norm_ir
-            t_reward = reward + agent.icm_eta * intrinsic_reward.item()
+            # t_reward = reward + agent.icm_eta * intrinsic_reward.item()
             
 
             # Store the transition in the replay buffer
-            agent.replay_buffer.push(obs.cpu(), action, t_reward, next_obs.cpu(), done)
+            agent.replay_buffer.push(obs.cpu(), action, reward, next_obs.cpu(), done)
 
             # Update the Q-network and ICM
-            q_loss, icm_loss = agent.train()
+            # q_loss, icm_loss = agent.train()
+            q_loss = agent.train()
 
             obs = next_obs
 
-            total_reward += t_reward
-            total_intrinsic_reward += agent.icm_eta * intrinsic_reward.item()
+            # total_reward += t_reward
+            # total_intrinsic_reward += agent.icm_eta * intrinsic_reward.item()
             total_extrinsic_reward += reward
 
-            if q_loss is not None and icm_loss is not None:
+            # if q_loss is not None and icm_loss is not None:
+            if q_loss is not None:
                 total_q_loss += q_loss
-                total_icm_loss += icm_loss
-                total_loss += q_loss + icm_loss            
+                # total_icm_loss += icm_loss
+                # total_loss += q_loss + icm_loss            
             steps += 1
 
             # Update the target network
@@ -301,6 +291,8 @@ def main():
             if agent.target_update_counter % agent.target_update_freq == 0:
                 agent.update()
             
+            if done:
+                break
             # env.render()
             
         # agent.scheduler.step(total_reward)
@@ -313,18 +305,18 @@ def main():
         if (eps + 1) % 20 == 0:
             if not os.path.exists('checkpoints/'):
                 os.makedirs('checkpoints/')
-            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/int_feature_{args.start_episode + eps + 1}.pth")
-            torch.save(agent.q_network.state_dict(), f"checkpoints/int_model_{args.start_episode + eps + 1}.pth")
-            torch.save(agent.icm.state_dict(), f"checkpoints/int_icm_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.feature_encoder.state_dict(), f"checkpoints/scheduler_feature_{args.start_episode + eps + 1}.pth")
+            torch.save(agent.q_network.state_dict(), f"checkpoints/scheduler_model_{args.start_episode + eps + 1}.pth")
+            # torch.save(agent.icm.state_dict(), f"checkpoints/scheduler_icm_{args.start_episode + eps + 1}.pth")
 
         if args.use_wandb:
             wandb.log({
-                'instrinsic_reward': total_intrinsic_reward,
+                # 'instrinsic_reward': total_intrinsic_reward,
                 'extrinsic reward': total_extrinsic_reward,
-                'total_reward': total_reward,
+                # 'total_reward': total_reward,
                 'q_loss': total_q_loss / steps,
-                'icm_loss': total_icm_loss / steps,
-                'total_loss': total_loss / steps,
+                # 'icm_loss': total_icm_loss / steps,
+                # 'total_loss': total_loss / steps,
             })
     # env.close()
 if __name__ == "__main__":

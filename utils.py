@@ -212,7 +212,7 @@ class NstepPrioritizedReplayBuffer:
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, input_shape):
+    def __init__(self, input_shape, proj_dim=512):
         super(FeatureEncoder, self).__init__()
         c, h, w = input_shape
         self.conv = nn.Sequential(
@@ -222,31 +222,41 @@ class FeatureEncoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU(),
+            nn.Flatten(),
         )
         with torch.no_grad():
             dummy_input = torch.zeros(1, c, h, w)
             self.conv_out_dim = int(np.prod(self.conv(dummy_input).shape[1:]))
+        
+        self.projector = nn.Sequential(
+            nn.Linear(self.conv_out_dim, proj_dim),
+            nn.ReLU(),
+        )
+
+        self.proj_dim = proj_dim
 
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(0)
         x = x / 255.0
-        return self.conv(x).view(x.size(0), -1)
-
+        x = self.conv(x)
+        return self.projector(x)
+    
 class NoisyLinear(nn.Module):
     """
     Noisy linear layer with factorized Gaussian noise (NoisyNet).
     """
-    def __init__(self, in_features, out_features, sigma_init=0.017):
+    def __init__(self, in_features, out_features, sigma_init=0.5):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.sigma_init = sigma_init
         # learnable parameters
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.full((out_features, in_features), sigma_init))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
         self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
         self.bias_mu = nn.Parameter(torch.empty(out_features))
-        self.bias_sigma = nn.Parameter(torch.full((out_features,), sigma_init))
+        self.bias_sigma = nn.Parameter(torch.empty((out_features)))
         self.register_buffer('bias_epsilon', torch.empty(out_features))
         self.reset_parameters()
         self.reset_noise()
@@ -255,6 +265,8 @@ class NoisyLinear(nn.Module):
         mu_range = 1 / self.in_features**0.5
         self.weight_mu.data.uniform_(-mu_range, mu_range)
         self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.sigma_init * mu_range)
+        self.bias_sigma.data.fill_(self.sigma_init * mu_range)
 
     def reset_noise(self):
         # factorized Gaussian noise
@@ -287,7 +299,7 @@ class NoisyDuelDQN(nn.Module):
         self.value = nn.Sequential(
             NoisyLinear(feature_dim, 512),
             nn.ReLU(),
-            NoisyLinear(512, 1,)
+            NoisyLinear(512, 1)
         )
 
     def forward(self, features):
@@ -300,84 +312,39 @@ class NoisyDuelDQN(nn.Module):
             if isinstance(module, NoisyLinear):
                 module.reset_noise()
 
-# class NoisyDuelDQN(nn.Module):
-#     def __init__(self, conv_out_dim, action_size, feature_dim=256, hidden_size=512):
-#         super(NoisyDuelDQN, self).__init__()
-#         self.project = nn.Sequential(
-#             nn.Linear(conv_out_dim, feature_dim),
-#             nn.ReLU()
-#         )
-#         self.lstm = nn.LSTM(
-#             input_size=feature_dim,
-#             hidden_size=hidden_size,
-#             num_layers=1,
-#             batch_first=True
-#         )
-#         self.advantage = nn.Sequential(
-#             NoisyLinear(hidden_size, 512),
-#             nn.ReLU(),
-#             NoisyLinear(512, action_size)
-#         )
-#         self.value = nn.Sequential(
-#             NoisyLinear(hidden_size, 512),
-#             nn.ReLU(),
-#             NoisyLinear(512, 1)
-#         )
-
-#     def forward(self, features, hidden=None):
-#         B, T, F = features.shape
-#         if hidden is None:
-#             # zero‐init hidden states
-#             h0 = torch.zeros(self.lstm.num_layers, B, self.lstm.hidden_size, device=features.device)
-#             c0 = torch.zeros(self.lstm.num_layers, B, self.lstm.hidden_size, device=features.device)
-#             hidden = (h0, c0)
-#         features = self.project(features)
-#         lstm_out, (h_n, c_n) = self.lstm(features, hidden)
-#         last = lstm_out[:, -1, :]  # [B, lstm_hidden]
-#         adv = self.advantage(last)
-#         val = self.value(last)
-#         return val + adv - adv.mean(dim=1, keepdim=True), (h_n, c_n)
-    
-#     def reset_noise(self):
-#         for module in self.modules():
-#             if isinstance(module, NoisyLinear):
-#                 module.reset_noise()
-
 class ICM(nn.Module):
     def __init__(self, feature_dim, action_size):
         super(ICM, self).__init__()
-        self.projector = nn.Linear(feature_dim, 256)
-
         self.inverse_model = nn.Sequential(
-            nn.Linear(512, 512),
+            nn.Linear(feature_dim * 2, 256),
             nn.ReLU(),
-            nn.Linear(512, action_size)
+            nn.Linear(256, action_size)
         )
 
         self.forward_model = nn.Sequential(
-            nn.Linear(256 + action_size, 512),
+            nn.Linear(feature_dim + action_size, 512),
             nn.ReLU(),
-            nn.Linear(512, 256)
+            nn.Linear(512, feature_dim)
         )
 
     def forward(self, state_feat, next_state_feat, action_label):
-        state_proj = self.projector(state_feat)
-        next_state_proj = self.projector(next_state_feat)
+        # state_proj = self.projector(state_feat)
+        # next_state_proj = self.projector(next_state_feat)
 
         if action_label.ndim == 1:
             action_label = action_label.unsqueeze(0)
 
         # Inverse model
-        inv_input = torch.cat((state_proj, next_state_proj), dim=1)
+        inv_input = torch.cat((state_feat, next_state_feat), dim=1)
         pred_action = self.inverse_model(inv_input)
         inv_loss = F.cross_entropy(pred_action, action_label.argmax(dim=-1))
 
         # Forward model
-        fwd_input = torch.cat((state_proj, action_label), dim=1)
+        fwd_input = torch.cat((state_feat, action_label), dim=1)
         pred_next_proj = self.forward_model(fwd_input)
-        fwd_loss = F.mse_loss(pred_next_proj, next_state_proj)
+        fwd_loss = F.mse_loss(pred_next_proj, next_state_feat)
 
         # Intrinsic reward
-        intrinsic_reward = 0.5 * ((pred_next_proj - next_state_proj) ** 2).sum(dim=1)
+        intrinsic_reward = 0.5 * ((pred_next_proj - next_state_feat) ** 2).sum(dim=1)
 
         return inv_loss, fwd_loss, intrinsic_reward
