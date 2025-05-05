@@ -93,8 +93,7 @@ class DQNAgent:
         # Initialize the optimizer
         self.optimizer = optim.Adam(
             list(self.feature_encoder.parameters()) +
-            list(self.q_network.parameters()) +
-            list(self.icm.parameters()),
+            list(self.q_network.parameters()),
             lr=lr
         )
         # self.optimizer = optim.Adam(
@@ -129,11 +128,6 @@ class DQNAgent:
         return q.argmax(dim=1).item()
     
     def train(self):
-        # self.q_network.train()
-        # self.icm.train()
-        # self.feature_encoder.train()
-        # self.target_network.eval()
-
         if len(self.replay_buffer) < self.batch_size:
             return None
 
@@ -166,28 +160,14 @@ class DQNAgent:
         self.replay_buffer.update_priorities(idxs, td_errors.detach().cpu().numpy())
 
         # Compute the loss
-        # loss = self.criterion(q_value, target_q_value)
         loss = F.smooth_l1_loss(td_errors, torch.zeros_like(td_errors), reduction='none', beta=1.0)
         loss = (weights * loss).mean()
 
-        # Update the ICM
-        # a_onehot_b = F.one_hot(action, self.action_dim).float().to(self.device)
-        # inv_loss, for_loss, _ = self.icm(ft, next_ft, a_onehot_b)
-        # icm_loss = (1 - self.beta) * inv_loss + self.beta * for_loss
-        
-        # all_loss = loss + self.icm_lambda * icm_loss
-        
-        # gradient clipping
-        # torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 250.0)
-
-        # Optimize the Q-network and ICM
+        # Optimize the Q-network
         self.optimizer.zero_grad()
-        # all_loss.backward()
         loss.backward()
         self.optimizer.step()  
-        # self.scheduler.step()
 
-        # return loss.item(), icm_loss.item()
         return loss.item()
     
     def update(self):
@@ -229,9 +209,6 @@ def main():
         print("Loading DQN from checkpoint...")
         agent.q_network.load_state_dict(torch.load(f"checkpoints/scheduler_model_{args.start_episode}.pth"))
         agent.target_network.load_state_dict(agent.q_network.state_dict())
-    # if os.path.exists(f"checkpoints/scheduler_icm_{args.start_episode}.pth"):
-    #     print("Loading ICM from checkpoint...")
-    #     agent.icm.load_state_dict(torch.load(f"checkpoints/scheduler_icm_{args.start_episode}.pth"))
     if os.path.exists(f"checkpoints/scheduler_feature_{args.start_episode}.pth"):
         print("Loading Feature Encoder from checkpoint...")
         agent.feature_encoder.load_state_dict(torch.load(f"checkpoints/scheduler_feature_{args.start_episode}.pth"))
@@ -241,30 +218,14 @@ def main():
     for eps in tqdm(range(args.n_episodes)):
         obs = env.reset()
         done = False
-        total_reward = 0
-        total_intrinsic_reward = 0
         total_extrinsic_reward = 0
         obs = torch.tensor(np.array(obs), dtype=torch.float32).to(agent.device).squeeze(-1)
         total_q_loss = 0
-        total_icm_loss = 0
-        total_loss = 0
-        total_reward = 0
         steps = 0
         while True:
             action = agent.select_action(obs)
             next_obs, reward, done, info = env.step(action)
             next_obs = torch.tensor(np.array(next_obs), dtype=torch.float32).to(agent.device).squeeze(-1)
-            # a_one_hot = F.one_hot(torch.tensor(action), agent.action_dim).float().to(agent.device)
-            # Compute the intrinsic reward
-            # with torch.no_grad():
-            #     _, _, intrinsic_reward = agent.icm(
-            #         agent.feature_encoder(obs),
-            #         agent.feature_encoder(next_obs),
-            #         a_one_hot
-            #     )
-            
-            # t_reward = reward + agent.icm_eta * intrinsic_reward.item()
-            
 
             # Store the transition in the replay buffer
             agent.replay_buffer.push(obs.cpu(), action, reward, next_obs.cpu(), done)
@@ -275,15 +236,11 @@ def main():
 
             obs = next_obs
 
-            # total_reward += t_reward
-            # total_intrinsic_reward += agent.icm_eta * intrinsic_reward.item()
             total_extrinsic_reward += reward
 
             # if q_loss is not None and icm_loss is not None:
             if q_loss is not None:
                 total_q_loss += q_loss
-                # total_icm_loss += icm_loss
-                # total_loss += q_loss + icm_loss            
             steps += 1
 
             # Update the target network
@@ -293,10 +250,7 @@ def main():
             
             if done:
                 break
-            # env.render()
             
-        # agent.scheduler.step(total_reward)
-
         reward_per_eps.append(total_extrinsic_reward)
         
         if (eps + 1) % 10 == 0:
@@ -307,17 +261,11 @@ def main():
                 os.makedirs('checkpoints/')
             torch.save(agent.feature_encoder.state_dict(), f"checkpoints/scheduler_feature_{args.start_episode + eps + 1}.pth")
             torch.save(agent.q_network.state_dict(), f"checkpoints/scheduler_model_{args.start_episode + eps + 1}.pth")
-            # torch.save(agent.icm.state_dict(), f"checkpoints/scheduler_icm_{args.start_episode + eps + 1}.pth")
 
         if args.use_wandb:
             wandb.log({
-                # 'instrinsic_reward': total_intrinsic_reward,
                 'extrinsic reward': total_extrinsic_reward,
-                # 'total_reward': total_reward,
                 'q_loss': total_q_loss / steps,
-                # 'icm_loss': total_icm_loss / steps,
-                # 'total_loss': total_loss / steps,
             })
-    # env.close()
 if __name__ == "__main__":
     main()

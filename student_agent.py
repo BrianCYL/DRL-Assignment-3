@@ -35,7 +35,7 @@ class Agent(object):
         # Load pretrained feature encoder
         self.encoder = FeatureEncoder((4, 84, 84))
         self.encoder.load_state_dict(
-            torch.load('checkpoints/scheduler_feature_400.pth',map_location=torch.device('cpu'))
+            torch.load('../checkpoints/scheduler_feature_700.pth',map_location=torch.device('cpu'))
             )
         self.encoder.eval()
 
@@ -43,7 +43,7 @@ class Agent(object):
         feat_dim = self.encoder.proj_dim
         self.q_net = NoisyDuelDQN(feat_dim, self.action_space.n)
         self.q_net.load_state_dict(
-            torch.load('checkpoints/scheduler_model_400.pth', map_location=torch.device('cpu'))
+            torch.load('../checkpoints/scheduler_model_700.pth', map_location=torch.device('cpu'))
             )
         self.q_net.eval()
         self.q_net.reset_noise()
@@ -85,7 +85,6 @@ class Agent(object):
         state = self._preprocess(observation)
         # observation = torch.tensor(np.array(observation), dtype=torch.float32).squeeze(-1)
         # state = observation.clone() if isinstance(observation, torch.Tensor) else torch.tensor(observation)
-        # NoisyNet reset
         self.q_net.reset_noise()
 
         # Forward pass
@@ -96,6 +95,7 @@ class Agent(object):
                 # Append the action to the action list
                 self.action_list.append(q.argmax(dim=1).item())
         return self.action_list.pop()
+        # return q.argmax(dim=1).item()
 
 def main():
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
@@ -115,10 +115,10 @@ def main():
         if done:
             break
         total_reward += reward
-        env.render()
+        # env.render()
 
     print(f'Total reward: {total_reward}')
-    env.close()
+    # env.close()
 
 if __name__ == "__main__":
     main()

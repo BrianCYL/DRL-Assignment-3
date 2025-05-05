@@ -4,46 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections import deque
 
-class RunningMeanStd:
-    """
-    Tracks the running mean and variance, so you can normalize a stream of scalars.
-    Uses Welford’s algorithm for numerical stability.
-    """
-    def __init__(self, epsilon=1e-4):
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = epsilon
-
-    def update(self, x):
-        """
-        Incorporate a new batch of values x (can be a numpy array or a scalar).
-        """
-        x = np.array(x, dtype=np.float64)
-        batch_mean = x.mean()
-        batch_var  = x.var()
-        batch_count = x.size
-
-        # from OpenAI baselines RunningMeanStd
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        new_mean = self.mean + delta * batch_count / tot_count
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        M2 = m_a + m_b + delta**2 * self.count * batch_count / tot_count
-        new_var = M2 / tot_count
-
-        self.mean = new_mean
-        self.var = new_var
-        self.count = tot_count
-
-    def normalize(self, x):
-        """
-        Normalize x using the current mean and standard deviation.
-        Returns a numpy array of the same shape as x.
-        """
-        return (x - self.mean) / (np.sqrt(self.var) + 1e-8)
-
 class PrioritizedReplayBuffer:
     """
     Simple array based Prioritized Experience Replay (no tree).
