@@ -35,7 +35,7 @@ class Agent(object):
         # Load pretrained feature encoder
         self.encoder = FeatureEncoder((4, 84, 84))
         self.encoder.load_state_dict(
-            torch.load('../checkpoints/scheduler_feature_700.pth',map_location=torch.device('cpu'))
+            torch.load('./checkpoints/scheduler_feature_700.pth',map_location=torch.device('cpu'))
             )
         self.encoder.eval()
 
@@ -43,7 +43,7 @@ class Agent(object):
         feat_dim = self.encoder.proj_dim
         self.q_net = NoisyDuelDQN(feat_dim, self.action_space.n)
         self.q_net.load_state_dict(
-            torch.load('../checkpoints/scheduler_model_700.pth', map_location=torch.device('cpu'))
+            torch.load('./checkpoints/scheduler_model_700.pth', map_location=torch.device('cpu'))
             )
         self.q_net.eval()
         self.q_net.reset_noise()
